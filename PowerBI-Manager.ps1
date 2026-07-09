@@ -347,7 +347,13 @@ function Do-Action {
         } elseif ($Action -eq 'Enable') {
             $r = Invoke-PBI 'Patch' ($base + '/refreshSchedule') '{ "value": { "enabled": true } }'
         } else {
-            $r = Invoke-PBI 'Patch' ($base + '/refreshSchedule') '{ "value": { "enabled": false } }'
+            # Datasets reject extra fields on disable; dataflows REQUIRE them.
+            if ($it.Type -eq 'Dataflow') {
+                $body = '{ "value": { "enabled": false, "times": [], "localTimeZoneId": "UTC" } }'
+            } else {
+                $body = '{ "value": { "enabled": false } }'
+            }
+            $r = Invoke-PBI 'Patch' ($base + '/refreshSchedule') $body
         }
 
         if ($r.ok) {
