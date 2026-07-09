@@ -39,7 +39,7 @@ $ProgressPreference = 'SilentlyContinue'
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-  Title="Power BI Workspace Manager" Height="740" Width="920"
+  Title="Power BI Workspace Manager" Height="800" Width="920"
   WindowStartupLocation="CenterScreen">
   <Grid Margin="10">
     <Grid.RowDefinitions>
@@ -47,6 +47,8 @@ $xaml = @'
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="170"/>
@@ -81,9 +83,23 @@ $xaml = @'
       <CheckBox x:Name="ChkWhatIf" Content="Dry run (WhatIf - preview only, no changes)" VerticalAlignment="Center" Margin="12,0,0,0" IsChecked="True"/>
     </StackPanel>
 
-    <ProgressBar Grid.Row="5" x:Name="Progress" Height="16" Margin="0,8,0,0" Minimum="0" Maximum="100" Value="0"/>
+    <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,8,0,0">
+      <Button x:Name="BtnHistory" Content="View History" Width="130" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <Button x:Name="BtnFailures" Content="Failure Report" Width="130" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <Button x:Name="BtnInfo" Content="View Info" Width="130" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <Button x:Name="BtnGSheets" Content="Check Google Sheets" Width="160" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <TextBlock Text="Read-only. Results log below and export to a CSV in the PBI-Reports folder next to the app." VerticalAlignment="Center" Margin="12,0,0,0" Foreground="Gray"/>
+    </StackPanel>
 
-    <TextBox Grid.Row="6" x:Name="LogBox" Margin="0,8,0,0" IsReadOnly="True"
+    <StackPanel Grid.Row="6" Orientation="Horizontal" Margin="0,8,0,0">
+      <Button x:Name="BtnFindFailures" Content="Find Recent Failures" Width="170" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <Button x:Name="BtnRefresh" Content="Refresh Selected" Width="150" Margin="0,0,8,0" Padding="6" IsEnabled="False"/>
+      <TextBlock Text="Find Recent Failures narrows checked items to those whose newest refresh failed. Refresh Selected honors Dry run." VerticalAlignment="Center" Margin="12,0,0,0" Foreground="Gray"/>
+    </StackPanel>
+
+    <ProgressBar Grid.Row="7" x:Name="Progress" Height="16" Margin="0,8,0,0" Minimum="0" Maximum="100" Value="0"/>
+
+    <TextBox Grid.Row="8" x:Name="LogBox" Margin="0,8,0,0" IsReadOnly="True"
       VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
   </Grid>
 </Window>
@@ -101,6 +117,12 @@ $Tree         = $Window.FindName('Tree')
 $BtnTakeOwner = $Window.FindName('BtnTakeOwner')
 $BtnEnable    = $Window.FindName('BtnEnable')
 $BtnDisable   = $Window.FindName('BtnDisable')
+$BtnHistory   = $Window.FindName('BtnHistory')
+$BtnFailures  = $Window.FindName('BtnFailures')
+$BtnInfo      = $Window.FindName('BtnInfo')
+$BtnGSheets   = $Window.FindName('BtnGSheets')
+$BtnFindFailures = $Window.FindName('BtnFindFailures')
+$BtnRefresh   = $Window.FindName('BtnRefresh')
 $ChkWhatIf    = $Window.FindName('ChkWhatIf')
 $Progress     = $Window.FindName('Progress')
 $LogBox       = $Window.FindName('LogBox')
@@ -143,6 +165,12 @@ function Set-Busy {
         $BtnTakeOwner.IsEnabled = $false
         $BtnEnable.IsEnabled    = $false
         $BtnDisable.IsEnabled   = $false
+        $BtnHistory.IsEnabled   = $false
+        $BtnFailures.IsEnabled  = $false
+        $BtnInfo.IsEnabled      = $false
+        $BtnGSheets.IsEnabled   = $false
+        $BtnFindFailures.IsEnabled = $false
+        $BtnRefresh.IsEnabled   = $false
     } else {
         $BtnLoad.IsEnabled      = ($script:Token -ne $null)
         $BtnSelectAll.IsEnabled = $script:Loaded
@@ -150,6 +178,12 @@ function Set-Busy {
         $BtnTakeOwner.IsEnabled = $script:Loaded
         $BtnEnable.IsEnabled    = $script:Loaded
         $BtnDisable.IsEnabled   = $script:Loaded
+        $BtnHistory.IsEnabled   = $script:Loaded
+        $BtnFailures.IsEnabled  = $script:Loaded
+        $BtnInfo.IsEnabled      = $script:Loaded
+        $BtnGSheets.IsEnabled   = $script:Loaded
+        $BtnFindFailures.IsEnabled = $script:Loaded
+        $BtnRefresh.IsEnabled   = $script:Loaded
     }
 }
 
@@ -170,29 +204,64 @@ function Get-FreshToken {
     }
 }
 
+function Wait-WithUI {
+    # Sleep while keeping the window responsive (pumps events every 200ms).
+    param([int]$Seconds)
+    $end = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $end) {
+        Start-Sleep -Milliseconds 200
+        Invoke-DoEvents
+    }
+}
+
 function Invoke-PBI {
     param([string]$Method, [string]$Uri, $Body)
     $headers = @{ Authorization = $script:Token }
-    try {
-        if ($Body) {
-            $d = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -Body $Body -ContentType 'application/json' -ErrorAction Stop
-        } else {
-            $d = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -ErrorAction Stop
-        }
-        return @{ ok = $true; data = $d }
-    } catch {
-        $msg = $_.Exception.Message
+    $maxRetries = 5
+    $attempt = 0
+    while ($true) {
+        $attempt = $attempt + 1
         try {
+            if ($Body) {
+                $d = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -Body $Body -ContentType 'application/json' -ErrorAction Stop
+            } else {
+                $d = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -ErrorAction Stop
+            }
+            return @{ ok = $true; data = $d }
+        } catch {
+            $status = 0
+            $retryAfter = 0
             $resp = $_.Exception.Response
             if ($resp -ne $null) {
-                $stream = $resp.GetResponseStream()
-                $srdr = New-Object System.IO.StreamReader($stream)
-                $bodyTxt = $srdr.ReadToEnd()
-                $srdr.Close()
-                if (-not [string]::IsNullOrWhiteSpace($bodyTxt)) { $msg = $bodyTxt }
+                try { $status = [int]$resp.StatusCode } catch { }
+                try {
+                    $ra = $resp.Headers['Retry-After']
+                    if ($ra) { $retryAfter = [int]$ra }
+                } catch { }
             }
-        } catch { }
-        return @{ ok = $false; message = $msg }
+
+            # 429 = rate limited. Honor Retry-After (capped) and retry.
+            if ($status -eq 429 -and $attempt -le $maxRetries) {
+                if ($retryAfter -le 0) { $retryAfter = 20 }
+                if ($retryAfter -gt 60) { $retryAfter = 60 }
+                Write-Log ('  Rate limited (429). Waiting ' + $retryAfter + 's, then retrying (attempt ' + $attempt + ' of ' + $maxRetries + ')...')
+                Wait-WithUI $retryAfter
+                continue
+            }
+
+            $msg = $_.Exception.Message
+            try {
+                if ($resp -ne $null) {
+                    $stream = $resp.GetResponseStream()
+                    $srdr = New-Object System.IO.StreamReader($stream)
+                    $bodyTxt = $srdr.ReadToEnd()
+                    $srdr.Close()
+                    if (-not [string]::IsNullOrWhiteSpace($bodyTxt)) { $msg = $bodyTxt }
+                }
+            } catch { }
+            if ($status -eq 429) { $msg = 'Rate limited (429) after ' + $maxRetries + ' retries. Try a smaller selection or wait a few minutes.' }
+            return @{ ok = $false; message = $msg }
+        }
     }
 }
 
@@ -372,6 +441,425 @@ function Do-Action {
 }
 
 # ---------------------------------------------------------------------------
+# Read-only reporting (run history, failures, info) + CSV export
+# ---------------------------------------------------------------------------
+function Get-ItemBase {
+    param($it)
+    if ($it.Type -eq 'Dataset') {
+        return 'https://api.powerbi.com/v1.0/myorg/groups/' + $it.WorkspaceId + '/datasets/' + $it.Id
+    } else {
+        return 'https://api.powerbi.com/v1.0/myorg/groups/' + $it.WorkspaceId + '/dataflows/' + $it.Id
+    }
+}
+
+function Get-DurationSec {
+    param($startTime, $endTime)
+    if ($startTime -and $endTime) {
+        try { return [int]([datetime]$endTime - [datetime]$startTime).TotalSeconds } catch { return '' }
+    }
+    return ''
+}
+
+function Save-Csv {
+    param($Rows, [string]$Prefix)
+    if ($Rows.Count -eq 0) { Write-Log 'Nothing to export (no rows).'; return $null }
+    $base = $PSScriptRoot
+    if ([string]::IsNullOrEmpty($base)) { $base = (Get-Location).Path }
+    $dir = Join-Path $base 'PBI-Reports'
+    if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $path = Join-Path $dir ($Prefix + '_' + $stamp + '.csv')
+    try {
+        $Rows | Export-Csv -Path $path -NoTypeInformation -Encoding UTF8
+        return $path
+    } catch {
+        Write-Log ('Could not write CSV: ' + $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-Runs {
+    # Returns normalized run objects for one item (newest first).
+    param($it, [int]$TopN)
+    $out = New-Object System.Collections.ArrayList
+    $base = Get-ItemBase $it
+
+    if ($it.Type -eq 'Dataset') {
+        $r = Invoke-PBI 'Get' ($base + '/refreshes?$top=' + $TopN) $null
+        if (-not $r.ok) { Write-Log ('  History error for "' + $it.Name + '": ' + $r.message); return $out }
+        foreach ($run in @($r.data.value)) {
+            $code = ''
+            $desc = ''
+            if ($run.serviceExceptionJson) {
+                try {
+                    $p = $run.serviceExceptionJson | ConvertFrom-Json
+                    $code = [string]$p.errorCode
+                    $desc = [string]$p.errorDescription
+                } catch {
+                    $desc = [string]$run.serviceExceptionJson
+                }
+            }
+            [void]$out.Add([pscustomobject]@{
+                Status = $run.status; StartTime = $run.startTime; EndTime = $run.endTime;
+                RefreshType = $run.refreshType; RequestId = $run.requestId;
+                ErrorCode = $code; ErrorMessage = $desc
+            })
+        }
+    } else {
+        # Dataflows use transactions; no error message is exposed by the API.
+        $r = Invoke-PBI 'Get' ($base + '/transactions') $null
+        if (-not $r.ok) { Write-Log ('  History error for "' + $it.Name + '": ' + $r.message); return $out }
+        $count = 0
+        foreach ($run in @($r.data.value)) {
+            if ($count -ge $TopN) { break }
+            [void]$out.Add([pscustomobject]@{
+                Status = $run.status; StartTime = $run.startTime; EndTime = $run.endTime;
+                RefreshType = $run.refreshType; RequestId = $run.id;
+                ErrorCode = ''; ErrorMessage = ''
+            })
+            $count = $count + 1
+        }
+    }
+    return $out
+}
+
+function Do-History {
+    param([bool]$FailuresOnly)
+    $items = Get-SelectedItems
+    if ($items.Count -eq 0) { Write-Log 'Nothing selected. Check one or more items first.'; return }
+    $topN = 10
+    $title = 'History'
+    if ($FailuresOnly) { $title = 'Failure Report' }
+    Write-Log ('--- ' + $title + ' on ' + $items.Count + ' item(s) (last ' + $topN + ' runs each) ---')
+
+    Set-Busy $true
+    $Progress.Maximum = [Math]::Max($items.Count, 1)
+    $Progress.Value = 0
+    $rows = New-Object System.Collections.ArrayList
+    $failCount = 0
+
+    foreach ($it in $items) {
+        $runs = Get-Runs $it $topN
+        $shownForItem = $false
+        foreach ($run in $runs) {
+            $isFail = ([string]$run.Status -match 'Fail')
+            if ($FailuresOnly -and -not $isFail) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                Status = $run.Status; StartTime = $run.StartTime; EndTime = $run.EndTime;
+                DurationSec = (Get-DurationSec $run.StartTime $run.EndTime);
+                RefreshType = $run.RefreshType; RequestId = $run.RequestId;
+                ErrorCode = $run.ErrorCode; ErrorMessage = $run.ErrorMessage
+            })
+
+            if ($isFail) { $failCount = $failCount + 1 }
+
+            if ($FailuresOnly) {
+                $emsg = $run.ErrorCode
+                if (-not $emsg) { $emsg = $run.ErrorMessage }
+                Write-Log ('  FAIL ' + $it.Type + ' "' + $it.Name + '" @ ' + $run.StartTime + ' :: ' + $emsg)
+            } elseif (-not $shownForItem) {
+                # For full history, log just the most recent run per item; CSV has the rest.
+                Write-Log ('  ' + $it.Type + ' "' + $it.Name + '": latest = ' + $run.Status + ' @ ' + $run.StartTime)
+                $shownForItem = $true
+            }
+        }
+        if ($FailuresOnly -and -not $shownForItem) { }
+        $Progress.Value = $Progress.Value + 1
+        Invoke-DoEvents
+    }
+
+    $prefix = 'History'
+    if ($FailuresOnly) { $prefix = 'FailureReport' }
+    $path = Save-Csv $rows $prefix
+    if ($path) { Write-Log ('CSV saved: ' + $path) }
+    if ($FailuresOnly) {
+        Write-Log ('Done. ' + $failCount + ' failed run(s) across ' + $items.Count + ' item(s).')
+    } else {
+        Write-Log ('Done. ' + $rows.Count + ' run(s) exported across ' + $items.Count + ' item(s).')
+    }
+    Set-Busy $false
+}
+
+function Do-Info {
+    $items = Get-SelectedItems
+    if ($items.Count -eq 0) { Write-Log 'Nothing selected. Check one or more items first.'; return }
+    Write-Log ('--- Info on ' + $items.Count + ' item(s) ---')
+
+    Set-Busy $true
+    $Progress.Maximum = [Math]::Max($items.Count, 1)
+    $Progress.Value = 0
+    $rows = New-Object System.Collections.ArrayList
+
+    foreach ($it in $items) {
+        $base = Get-ItemBase $it
+        $nSrc = 0
+        $nParam = 0
+        $nUser = 0
+
+        # Data sources (datasets and dataflows)
+        $r = Invoke-PBI 'Get' ($base + '/datasources') $null
+        if ($r.ok) {
+            foreach ($src in @($r.data.value)) {
+                $cd = $src.connectionDetails
+                $v1 = ''
+                $v2 = ''
+                if ($cd) {
+                    if ($cd.server) { $v1 = [string]$cd.server } elseif ($cd.url) { $v1 = [string]$cd.url }
+                    if ($cd.database) { $v2 = [string]$cd.database } elseif ($cd.path) { $v2 = [string]$cd.path }
+                }
+                [void]$rows.Add([pscustomobject]@{
+                    Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                    InfoType = 'DataSource'; Name = [string]$src.datasourceType; Value1 = $v1; Value2 = $v2; Value3 = ''
+                })
+                $nSrc = $nSrc + 1
+            }
+        } else {
+            [void]$rows.Add([pscustomobject]@{ Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name; InfoType = 'DataSource'; Name = '(error)'; Value1 = $r.message; Value2 = ''; Value3 = '' })
+        }
+
+        if ($it.Type -eq 'Dataset') {
+            # Parameters
+            $r = Invoke-PBI 'Get' ($base + '/parameters') $null
+            if ($r.ok) {
+                foreach ($p in @($r.data.value)) {
+                    [void]$rows.Add([pscustomobject]@{
+                        Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                        InfoType = 'Parameter'; Name = [string]$p.name; Value1 = [string]$p.type; Value2 = [string]$p.currentValue; Value3 = ''
+                    })
+                    $nParam = $nParam + 1
+                }
+            }
+            # Refresh schedule details
+            $r = Invoke-PBI 'Get' ($base + '/refreshSchedule') $null
+            if ($r.ok) {
+                $sc = $r.data
+                $days = (@($sc.days) -join ',')
+                $times = (@($sc.times) -join ',')
+                [void]$rows.Add([pscustomobject]@{
+                    Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                    InfoType = 'Schedule'; Name = 'enabled=' + [string]$sc.enabled; Value1 = $days; Value2 = $times; Value3 = [string]$sc.localTimeZoneId
+                })
+            }
+        } else {
+            [void]$rows.Add([pscustomobject]@{ Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name; InfoType = 'Schedule'; Name = 'n/a'; Value1 = 'dataflow schedule not readable via API'; Value2 = ''; Value3 = '' })
+        }
+
+        # Users / permissions
+        $r = Invoke-PBI 'Get' ($base + '/users') $null
+        if ($r.ok) {
+            foreach ($u in @($r.data.value)) {
+                $right = ''
+                if ($u.datasetUserAccessRight) { $right = [string]$u.datasetUserAccessRight }
+                elseif ($u.dataflowUserAccessRight) { $right = [string]$u.dataflowUserAccessRight }
+                $who = $u.identifier
+                if (-not $who) { $who = $u.displayName }
+                [void]$rows.Add([pscustomobject]@{
+                    Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                    InfoType = 'User'; Name = [string]$who; Value1 = [string]$u.principalType; Value2 = $right; Value3 = ''
+                })
+                $nUser = $nUser + 1
+            }
+        } else {
+            [void]$rows.Add([pscustomobject]@{ Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name; InfoType = 'User'; Name = '(error)'; Value1 = $r.message; Value2 = ''; Value3 = '' })
+        }
+
+        Write-Log ('  ' + $it.Type + ' "' + $it.Name + '": ' + $nSrc + ' source(s), ' + $nParam + ' param(s), ' + $nUser + ' user(s)')
+        $Progress.Value = $Progress.Value + 1
+        Invoke-DoEvents
+    }
+
+    $path = Save-Csv $rows 'Info'
+    if ($path) { Write-Log ('CSV saved: ' + $path) }
+    Write-Log ('Done. ' + $rows.Count + ' info row(s) exported across ' + $items.Count + ' item(s).')
+    Set-Busy $false
+}
+
+function Test-IsGoogleSheets {
+    # Returns the matching detail string if a datasource looks like Google Sheets, else $null.
+    param($src)
+    $cd = $src.connectionDetails
+    $candidates = New-Object System.Collections.ArrayList
+    [void]$candidates.Add([string]$src.datasourceType)
+    if ($cd) {
+        [void]$candidates.Add([string]$cd.kind)
+        [void]$candidates.Add([string]$cd.path)
+        [void]$candidates.Add([string]$cd.url)
+    }
+    foreach ($c in $candidates) {
+        if ([string]::IsNullOrEmpty($c)) { continue }
+        $lc = $c.ToLower()
+        if ($lc -match 'googlesheet' -or $lc -match 'google sheet' -or $lc.Contains('docs.google.com/spreadsheets') -or $lc.Contains('spreadsheets.google.com')) {
+            return $c
+        }
+    }
+    return $null
+}
+
+function Do-CheckGoogleSheets {
+    $items = Get-SelectedItems
+    if ($items.Count -eq 0) { Write-Log 'Nothing selected. Check one or more items first.'; return }
+    Write-Log ('--- Check Google Sheets on ' + $items.Count + ' item(s) ---')
+
+    Set-Busy $true
+    $Progress.Maximum = [Math]::Max($items.Count, 1)
+    $Progress.Value = 0
+    $rows = New-Object System.Collections.ArrayList
+    $hits = 0
+
+    foreach ($it in $items) {
+        $base = Get-ItemBase $it
+        $r = Invoke-PBI 'Get' ($base + '/datasources') $null
+        if (-not $r.ok) {
+            Write-Log ('  Could not read datasources for "' + $it.Name + '": ' + $r.message)
+            $Progress.Value = $Progress.Value + 1
+            Invoke-DoEvents
+            continue
+        }
+
+        $matches = New-Object System.Collections.ArrayList
+        foreach ($src in @($r.data.value)) {
+            $hit = Test-IsGoogleSheets $src
+            if ($hit) { [void]$matches.Add($hit) }
+        }
+
+        if ($matches.Count -gt 0) {
+            $hits = $hits + 1
+            $detail = (($matches | Select-Object -Unique) -join ' | ')
+            Write-Log ('  GOOGLE SHEETS: ' + $it.Type + ' "' + $it.Name + '" (workspace: ' + $it.WorkspaceName + ')')
+            [void]$rows.Add([pscustomobject]@{
+                Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                UsesGoogleSheets = 'YES'; MatchDetail = $detail
+            })
+        } else {
+            [void]$rows.Add([pscustomobject]@{
+                Workspace = $it.WorkspaceName; ItemType = $it.Type; ItemName = $it.Name;
+                UsesGoogleSheets = 'no'; MatchDetail = ''
+            })
+        }
+
+        $Progress.Value = $Progress.Value + 1
+        Invoke-DoEvents
+    }
+
+    $path = Save-Csv $rows 'GoogleSheetsCheck'
+    if ($path) { Write-Log ('CSV saved: ' + $path) }
+    Write-Log ('Done. ' + $hits + ' of ' + $items.Count + ' item(s) use Google Sheets.')
+    Set-Busy $false
+}
+
+function Get-LatestStatus {
+    # Returns @{ status = <string>; message = <string> } for an item's newest run.
+    param($it)
+    $base = Get-ItemBase $it
+    if ($it.Type -eq 'Dataset') {
+        $r = Invoke-PBI 'Get' ($base + '/refreshes?$top=1') $null
+        if (-not $r.ok) { return @{ status = 'Error'; message = $r.message } }
+        $runs = @($r.data.value)
+        if ($runs.Count -eq 0) { return @{ status = 'None'; message = '' } }
+        return @{ status = [string]$runs[0].status; message = '' }
+    } else {
+        $r = Invoke-PBI 'Get' ($base + '/transactions') $null
+        if (-not $r.ok) { return @{ status = 'Error'; message = $r.message } }
+        $runs = @($r.data.value)
+        if ($runs.Count -eq 0) { return @{ status = 'None'; message = '' } }
+        $latest = $runs | Sort-Object -Property startTime -Descending | Select-Object -First 1
+        return @{ status = [string]$latest.status; message = '' }
+    }
+}
+
+function Do-FindRecentFailures {
+    $items = Get-SelectedItems
+    if ($items.Count -eq 0) {
+        Write-Log 'Nothing selected. Select a scope first (search + Select All, or check a workspace), then Find Recent Failures.'
+        return
+    }
+    Write-Log ('--- Find Recent Failures among ' + $items.Count + ' selected item(s) ---')
+
+    Set-Busy $true
+    $Progress.Maximum = [Math]::Max($items.Count, 1)
+    $Progress.Value = 0
+    $failedKeys = @{}
+    $failCount = 0
+
+    foreach ($it in $items) {
+        $res = Get-LatestStatus $it
+        $st = $res.status
+        if ($st -eq 'Error') {
+            Write-Log ('  ? ' + $it.Type + ' "' + $it.Name + '": could not read status: ' + $res.message)
+        } elseif ($st -match 'Fail') {
+            $failCount = $failCount + 1
+            $failedKeys[($it.WorkspaceId + '|' + $it.Type + '|' + $it.Id)] = $true
+            Write-Log ('  FAILED: ' + $it.Type + ' "' + $it.Name + '" (workspace: ' + $it.WorkspaceName + ')')
+        }
+        $Progress.Value = $Progress.Value + 1
+        Invoke-DoEvents
+    }
+
+    # Keep only the failed items checked; uncheck everything else.
+    foreach ($cb in $script:ItemCheckBoxes) {
+        $tag = $cb.Tag
+        $key = $tag.WorkspaceId + '|' + $tag.Type + '|' + $tag.Id
+        if ($failedKeys.ContainsKey($key)) { $cb.IsChecked = $true } else { $cb.IsChecked = $false }
+    }
+
+    Write-Log ('Done. ' + $failCount + ' item(s) had a failed most recent refresh; only those are now selected.')
+    if ($failCount -gt 0) {
+        Write-Log 'Use "Refresh Selected" to re-run them all, or uncheck to do them one at a time.'
+    }
+    Set-Busy $false
+}
+
+function Do-RefreshSelected {
+    $items = Get-SelectedItems
+    if ($items.Count -eq 0) {
+        Write-Log 'Nothing selected. Check the item(s) you want to refresh.'
+        return
+    }
+    $whatIf = ($ChkWhatIf.IsChecked -eq $true)
+    $mode = 'LIVE'
+    if ($whatIf) { $mode = 'DRY RUN' }
+    Write-Log ('--- Refresh on ' + $items.Count + ' item(s) [' + $mode + '] ---')
+
+    Set-Busy $true
+    $Progress.Maximum = [Math]::Max($items.Count, 1)
+    $Progress.Value = 0
+    $ok = 0
+    $fail = 0
+
+    foreach ($it in $items) {
+        $label = $it.Type + ' "' + $it.Name + '" (workspace: ' + $it.WorkspaceName + ')'
+        if ($whatIf) {
+            Write-Log ('[WhatIf] would refresh -> ' + $label)
+            $Progress.Value = $Progress.Value + 1
+            Invoke-DoEvents
+            continue
+        }
+
+        $base = Get-ItemBase $it
+        if ($it.Type -eq 'Dataset') {
+            $r = Invoke-PBI 'Post' ($base + '/refreshes') '{ "notifyOption": "NoNotification" }'
+        } else {
+            $r = Invoke-PBI 'Post' ($base + '/refreshes?processType=default') '{ "notifyOption": "NoNotification" }'
+        }
+
+        if ($r.ok) {
+            Write-Log ('OK    refresh started -> ' + $label)
+            $ok = $ok + 1
+        } else {
+            Write-Log ('FAIL  refresh -> ' + $label + ' :: ' + $r.message)
+            $fail = $fail + 1
+        }
+        $Progress.Value = $Progress.Value + 1
+        Invoke-DoEvents
+    }
+
+    Write-Log ('Done. Started: ' + $ok + '  Failed: ' + $fail)
+    Set-Busy $false
+}
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 $SearchBox.Add_TextChanged({
@@ -424,6 +912,13 @@ $BtnClearAll.Add_Click({
 $BtnTakeOwner.Add_Click({ Do-Action 'TakeOwner' })
 $BtnEnable.Add_Click({    Do-Action 'Enable' })
 $BtnDisable.Add_Click({   Do-Action 'Disable' })
+
+$BtnHistory.Add_Click({  Do-History $false })
+$BtnFailures.Add_Click({ Do-History $true })
+$BtnInfo.Add_Click({     Do-Info })
+$BtnGSheets.Add_Click({  Do-CheckGoogleSheets })
+$BtnFindFailures.Add_Click({ Do-FindRecentFailures })
+$BtnRefresh.Add_Click({  Do-RefreshSelected })
 
 # ---------------------------------------------------------------------------
 # Sign in ONCE on the console thread, before the window opens.
